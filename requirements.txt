@@ -1,9 +1,24 @@
-transformers==4.46.3
-tokenizers==0.20.3
+# DeepSeek-OCR 依赖
+# 适用于 DGX Spark (ASUS GX10) + CUDA 13.0 + ARM64
+
+# PyTorch (需要单独安装，见 README.md)
+# pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu130
+
+# Transformers 和 Tokenizers
+transformers>=4.56.0
+tokenizers>=0.21.1
+
+# 图像处理
+Pillow>=10.0.0
+einops>=0.8.0
+numpy>=2.0.0
+
+# 工具库
+easydict
+addict
+tqdm
+
+# PDF 处理
 PyMuPDF
 img2pdf
-einops
-easydict
-addict 
-Pillow
-numpy
+pdf2image
