@@ -208,24 +208,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 使用 Transformers 随机处理一张图片（在 deepseek-ocr 环境中）
-  conda activate deepseek-ocr
+  # 直接指定图片文件
+  python run_ocr_cli.py --framework transformers --file test_resouce/sample1/拓殖大学_page-01.png
+
+  # 使用 Transformers 随机处理一张图片
   python run_ocr_cli.py --framework transformers --mode random --input test_resouce/sample1
 
-  # 使用 vLLM 处理所有图片（在 deepseek-ocr-vllm 环境中）
-  conda activate deepseek-ocr-vllm
+  # 使用 vLLM 处理所有图片
   python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
 
 注意:
+  - --file 参数优先级最高，指定后忽略 --input 和 --mode
   - Transformers 框架需要在 deepseek-ocr 环境中运行
-  - vLLM 框架需要在 deepseek-ocr-vllm 环境中运行
-  - 两个框架的依赖版本不兼容，无法在同一环境中同时使用
         """)
 
     parser.add_argument('--framework',
                         choices=['transformers', 'vllm'],
                         required=True,
                         help='选择使用的框架: transformers 或 vllm（必选）')
+
+    parser.add_argument('--file',
+                        type=str,
+                        default=None,
+                        help='直接指定图片文件路径（指定后忽略 --input 和 --mode）')
 
     parser.add_argument('--mode',
                         choices=['random', 'all'],
@@ -248,22 +253,39 @@ def main():
     print("OCR 识别工具")
     print("=" * 60)
     print(f"框架: {args.framework}")
-    print(f"模式: {args.mode}")
-    print(f"输入目录: {args.input}")
-    print(f"输出目录: {args.output}")
-    print("=" * 60)
 
-    # 获取图片文件列表
-    try:
-        image_files = get_image_files(args.input)
-        print(f"\n找到 {len(image_files)} 张图片")
-        if args.mode == 'random':
-            print("（将随机选择1张处理）")
-        else:
-            print("（将按文件名顺序处理所有图片）")
-    except Exception as e:
-        print(f"\n错误: {e}")
-        sys.exit(1)
+    # 处理 --file 参数（优先级最高）
+    if args.file:
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"\n错误: 文件不存在: {args.file}")
+            sys.exit(1)
+        if file_path.suffix.lower() not in SUPPORTED_FORMATS:
+            print(f"\n错误: 不支持的文件格式: {file_path.suffix}")
+            print(f"支持的格式: {', '.join(SUPPORTED_FORMATS)}")
+            sys.exit(1)
+        image_files = [file_path]
+        print(f"指定文件: {args.file}")
+        print(f"输出目录: {args.output}")
+        print("=" * 60)
+        print(f"\n处理 1 张图片: {file_path.name}")
+    else:
+        print(f"模式: {args.mode}")
+        print(f"输入目录: {args.input}")
+        print(f"输出目录: {args.output}")
+        print("=" * 60)
+
+        # 获取图片文件列表
+        try:
+            image_files = get_image_files(args.input)
+            print(f"\n找到 {len(image_files)} 张图片")
+            if args.mode == 'random':
+                print("（将随机选择1张处理）")
+            else:
+                print("（将按文件名顺序处理所有图片）")
+        except Exception as e:
+            print(f"\n错误: {e}")
+            sys.exit(1)
 
     # 创建结果目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -272,13 +294,16 @@ def main():
     print(f"\n结果保存目录: {result_base_dir}")
 
     # 根据框架选择处理函数
+    # 如果指定了 --file，则 mode 强制为 'all'（不进行随机选择）
+    effective_mode = 'all' if args.file else args.mode
     try:
         if args.framework == 'transformers':
             results = process_with_transformers(image_files, result_base_dir,
-                                                result_base_dir, args.mode)
+                                                result_base_dir,
+                                                effective_mode)
         else:  # vllm
             results = process_with_vllm(image_files, result_base_dir,
-                                        result_base_dir, args.mode)
+                                        result_base_dir, effective_mode)
     except KeyboardInterrupt:
         print("\n\n用户中断，正在退出...")
         sys.exit(1)
