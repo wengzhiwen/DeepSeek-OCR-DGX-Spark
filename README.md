@@ -4,6 +4,17 @@
 
 > 📖 **原项目**: [deepseek-ai/DeepSeek-OCR](https://github.com/deepseek-ai/DeepSeek-OCR) | [论文](https://arxiv.org/abs/2510.18234) | [HuggingFace 模型](https://huggingface.co/deepseek-ai/DeepSeek-OCR)
 
+## 目录
+
+- [硬件环境](#硬件环境)
+- [软件版本](#软件版本)
+- [快速验证](#快速验证)
+- [一、Transformers 推理环境 (deepseek-ocr)](#一transformers-推理环境-deepseek-ocr)
+- [二、Transformers 推理使用](#二transformers-推理使用)
+- [三、vLLM 推理环境 (deepseek-ocr-vllm)](#三vllm-推理环境-deepseek-ocr-vllm)
+- [四、环境使用指南](#四环境使用指南)
+- [五、参考资源](#五参考资源)
+
 ## 硬件环境
 
 | 项目 | 配置 |
@@ -16,17 +27,106 @@
 
 ## 软件版本
 
+由于 Transformers 和 vLLM 版本依赖不兼容，本项目提供两个独立的 conda 环境：
+
+### 环境 1: deepseek-ocr (Transformers 推理)
+
 | 组件 | 版本 | 说明 |
 |------|------|------|
 | Python | 3.12.9 | conda 环境 |
 | PyTorch | 2.9.0+cu130 | ARM64 + CUDA 13.0 |
-| Transformers | 4.57.3 | |
-| vLLM | 0.11.2 | 从源码编译 |
-| Triton | 3.5.0 | |
+| Transformers | 4.45.2 | 包含 LlamaFlashAttention2 |
+| Tokenizers | 0.20.3 | 兼容 Transformers 4.45.2 |
+| Attention | Eager | 标准实现（慢但稳定） |
+| 运行脚本 | `run_ocr_cli.py --framework transformers` | |
+
+**配置状态**: ✅ 已配置完成
+
+### 环境 2: deepseek-ocr-vllm (vLLM 推理)
+
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.12.9 | conda 环境 |
+| PyTorch | 2.9.0+cu130 | ARM64 + CUDA 13.0 |
+| Transformers | 4.57.3 | 包含 DeepseekV3Config |
+| Tokenizers | 0.22.1 | 兼容新版 Transformers |
+| vLLM | 0.11.3.dev0 | 从源码编译 (基于 v0.11.2) |
+| Triton | 3.5.0 | vLLM 依赖 |
+| Attention | Flash Attention | 高性能实现 |
+| 运行脚本 | `run_ocr_cli.py --framework vllm` | |
+
+**配置状态**: ✅ 已配置完成
+
+### 环境对比
+
+| 特性 | deepseek-ocr | deepseek-ocr-vllm |
+|------|--------------|-------------------|
+| **推理引擎** | Transformers | vLLM |
+| **性能** | 较慢 | 更快 |
+| **Attention 实现** | Eager | Flash Attention |
+| **适用场景** | 开发测试 | 生产部署 |
+| **并发能力** | 低 | 高 (173.81x @ 8K tokens) |
+| **内存效率** | 一般 | 优秀 (KV cache 优化) |
 
 ---
 
-## 一、通用环境配置
+## 快速验证
+
+### 验证环境配置
+
+验证两个环境是否配置正确：
+
+**验证 deepseek-ocr 环境**：
+```bash
+conda activate deepseek-ocr
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}')"
+python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
+python -c "import tokenizers; print(f'Tokenizers: {tokenizers.__version__}')"
+```
+
+预期输出：
+```
+PyTorch: 2.9.0+cu130, CUDA: 13.0
+Transformers: 4.45.2
+Tokenizers: 0.20.3
+```
+
+**验证 deepseek-ocr-vllm 环境**：
+```bash
+conda activate deepseek-ocr-vllm
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}')"
+python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
+python -c "import tokenizers; print(f'Tokenizers: {tokenizers.__version__}')"
+python -c "import vllm; print(f'vLLM: {vllm.__version__}')"
+```
+
+预期输出：
+```
+PyTorch: 2.9.0+cu130, CUDA: 13.0
+Transformers: 4.57.3
+Tokenizers: 0.22.1
+vLLM: 0.11.3.dev0+g275de3417.d20251204
+```
+
+### 验证 OCR 功能
+
+**使用 Transformers 框架测试**：
+```bash
+conda activate deepseek-ocr
+python run_ocr_cli.py --framework transformers --mode random --input test_resouce/sample1
+```
+
+**使用 vLLM 框架测试**：
+```bash
+conda activate deepseek-ocr-vllm
+python run_ocr_cli.py --framework vllm --mode random --input test_resouce/sample1
+```
+
+如果运行成功，会在 `results/` 目录下生成带时间戳的结果文件夹，包含 OCR 识别的文本、Markdown 和带边界框的图片。
+
+---
+
+## 一、Transformers 推理环境 (deepseek-ocr)
 
 ### 1.1 创建 Conda 环境
 
@@ -55,15 +155,47 @@ PyTorch: 2.9.0+cu130, CUDA: 13.0, GPU: NVIDIA GB10
 
 > ⚠️ **注意**: 会出现 CUDA capability 警告（12.1 vs 12.0），这是正常的，不影响使用。
 
-### 1.3 安装基础依赖
+### 1.3 安装 Transformers 和 Tokenizers
+
+```bash
+# 必须使用 4.45.2 版本，该版本包含 DeepSeek-OCR 模型代码所需的 LlamaFlashAttention2
+pip install transformers==4.45.2 tokenizers==0.20.3
+```
+
+验证安装：
+```bash
+python -c "import transformers, tokenizers; print(f'Transformers: {transformers.__version__}, Tokenizers: {tokenizers.__version__}')"
+```
+
+预期输出：
+```
+Transformers: 4.45.2, Tokenizers: 0.20.3
+```
+
+### 1.4 安装基础依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
+### 1.5 配置环境变量（可选）
+
+环境变量会在激活 conda 环境时自动设置。如果未自动设置，请手动创建激活脚本：
+
+```bash
+mkdir -p ~/miniconda3/envs/deepseek-ocr/etc/conda/activate.d
+cat > ~/miniconda3/envs/deepseek-ocr/etc/conda/activate.d/env_vars.sh << 'EOF'
+#!/bin/bash
+export TORCH_CUDA_ARCH_LIST="12.1a"
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=1
+echo "✓ DeepSeek-OCR 环境变量已设置"
+EOF
+```
+
 ---
 
-## 二、Transformers 推理
+## 二、Transformers 推理使用
 
 Transformers 推理相对简单，不需要编译 vLLM。依赖已包含在 `requirements.txt` 中。
 
@@ -84,7 +216,23 @@ model = AutoModel.from_pretrained(
 
 > ⚠️ `eager` 实现速度较慢，但功能完整。
 
-### 2.2 运行模式
+### 2.2 运行 OCR 识别
+
+使用统一的命令行工具 `run_ocr_cli.py`：
+
+```bash
+conda activate deepseek-ocr
+
+# 随机处理一张图片（推荐用于测试）
+python run_ocr_cli.py --framework transformers --mode random --input test_resouce/sample1
+
+# 处理所有图片
+python run_ocr_cli.py --framework transformers --mode all --input test_resouce/sample1
+```
+
+**test_resouce/sample1**是一个装着数张图片的文件夹
+
+### 2.3 运行模式
 
 | 模式 | base_size | image_size | crop_mode | vision tokens |
 |------|-----------|------------|-----------|---------------|
@@ -96,9 +244,71 @@ model = AutoModel.from_pretrained(
 
 ---
 
-## 三、vLLM 推理（从源码编译）
+## 三、vLLM 推理环境 (deepseek-ocr-vllm)
 
-### 3.1 为什么需要源码编译？
+### 3.1 为什么需要独立环境？
+
+Transformers 和 vLLM 对依赖版本要求不兼容：
+
+| 依赖 | Transformers 环境 | vLLM 环境 |
+|------|------------------|----------|
+| transformers | 4.45.2（含 LlamaFlashAttention2） | 4.56.0+（含 DeepseekV3Config） |
+| tokenizers | 0.20.3 | 0.21.1+ |
+
+因此需要创建独立的 `deepseek-ocr-vllm` 环境。
+
+### 3.2 创建 Conda 环境
+
+```bash
+conda create -n deepseek-ocr-vllm python=3.12.9 -y
+conda activate deepseek-ocr-vllm
+```
+
+### 3.3 安装 PyTorch (CUDA 13.0 + ARM64)
+
+```bash
+pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu130
+```
+
+### 3.4 安装 Transformers 和 Tokenizers
+
+```bash
+# vLLM 需要较新版本的 transformers（会自动安装最新版本）
+pip install 'transformers>=4.56.0' 'tokenizers>=0.21.1'
+```
+
+验证安装：
+```bash
+python -c "import transformers, tokenizers; print(f'Transformers: {transformers.__version__}, Tokenizers: {tokenizers.__version__}')"
+```
+
+预期输出：
+```
+Transformers: 4.57.3, Tokenizers: 0.22.1
+```
+
+### 3.5 安装基础依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3.6 配置环境变量
+
+创建环境激活脚本：
+
+```bash
+mkdir -p ~/miniconda3/envs/deepseek-ocr-vllm/etc/conda/activate.d
+cat > ~/miniconda3/envs/deepseek-ocr-vllm/etc/conda/activate.d/env_vars.sh << 'EOF'
+#!/bin/bash
+export TORCH_CUDA_ARCH_LIST="12.1a"
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=1
+echo "✓ DeepSeek-OCR-vLLM 环境变量已设置"
+EOF
+```
+
+### 3.7 为什么需要源码编译 vLLM？
 
 vLLM 官方预编译的 wheel 包是基于 **CUDA 12.x + x86_64** 的，在 DGX Spark 上会遇到：
 
@@ -108,17 +318,17 @@ vLLM 官方预编译的 wheel 包是基于 **CUDA 12.x + x86_64** 的，在 DGX 
 
 **解决方案**: 从源码编译 vLLM。
 
-### 3.2 准备工作
+### 3.8 准备编译工具
 
 ```bash
-# 确保已激活 conda 环境
-conda activate deepseek-ocr
+# 确保已激活 vLLM 环境
+conda activate deepseek-ocr-vllm
 
 # 安装编译依赖
 pip install cmake ninja pybind11 setuptools wheel setuptools_scm
 ```
 
-### 3.3 获取 vLLM 源码
+### 3.9 获取 vLLM 源码
 
 ```bash
 mkdir -p ~/vllm-install
@@ -129,7 +339,7 @@ git checkout v0.11.2
 git submodule update --init --recursive
 ```
 
-### 3.4 修复 pyproject.toml
+### 3.10 修复 pyproject.toml
 
 vLLM v0.11.2 的 `pyproject.toml` 需要修复 license 字段格式：
 
@@ -139,20 +349,17 @@ sed -i 's/^license = "Apache-2.0"$/license = {text = "Apache-2.0"}/' pyproject.t
 sed -i '/^license-files = /d' pyproject.toml
 ```
 
-### 3.5 编译安装
+### 3.11 编译安装
 
 ```bash
 cd ~/vllm-install/vllm
 
-# 设置编译环境变量
-export TORCH_CUDA_ARCH_LIST="12.1a"
-export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
-
 # 编译安装（约 15-20 分钟）
+# 注意：环境变量已在 conda 环境激活时自动设置，无需手动 export
 pip install --no-build-isolation -e .
 ```
 
-### 3.6 验证安装
+### 3.12 验证安装
 
 ```bash
 python -c "import vllm; print(f'vLLM: {vllm.__version__}')"
@@ -167,14 +374,175 @@ DeepSeek-OCR support: OK
 
 > **关于版本号**: checkout `v0.11.2` 但显示 `0.11.3.dev0` 是正常的。vLLM 使用 `setuptools_scm` 从 git 自动生成版本号，格式为 `{next_version}.dev{distance}+g{commit}`。v0.11.2 tag 之后的下一个版本是 0.11.3，所以显示为 dev 版本。
 
-**vLLM 默认使用 Gundam 模式**（硬编码在源码中）：
+### 3.13 运行 OCR 识别
+
+使用统一的命令行工具 `run_ocr_cli.py`：
+
+```bash
+conda activate deepseek-ocr-vllm
+
+# 随机处理一张图片（推荐用于测试）
+python run_ocr_cli.py --framework vllm --mode random --input test_resouce/sample1
+
+# 处理所有图片（推荐用于批量处理）
+python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
+```
+
+**vLLM 默认使用 Gundam 模式**（硬编码在源码中），适合处理大尺寸文档图片。
 
 ---
 
-## 四、参考资源
+## 四、环境使用指南
+
+### 4.1 如何选择环境
+
+| 场景 | 推荐环境 | 原因 |
+|------|---------|------|
+| 开发调试 | deepseek-ocr | 简单直接，便于调试 |
+| 生产部署 | deepseek-ocr-vllm | 性能更好，支持高并发 |
+| 单张图片处理 | deepseek-ocr | 启动快，无需预热 |
+| 批量处理 | deepseek-ocr-vllm | 吞吐量高，内存效率好 |
+| 首次使用 | deepseek-ocr | 配置简单，依赖少 |
+
+### 4.2 环境切换和使用
+
+```bash
+# 切换到 Transformers 环境
+conda activate deepseek-ocr
+python run_ocr_cli.py --framework transformers --mode random --input test_resouce/sample1
+
+# 切换到 vLLM 环境
+conda activate deepseek-ocr-vllm
+python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
+```
+
+**命令行参数说明**：
+- `--framework`: 必选，指定使用的框架（`transformers` 或 `vllm`）
+- `--mode`: 可选，工作模式（`random` 随机选择1张，`all` 处理所有图片，默认 `random`）
+- `--input`: 可选，输入目录路径（默认 `test_resouce/sample1`）
+- `--output`: 可选，输出基础目录（默认 `results`）
+
+查看完整帮助：
+```bash
+python run_ocr_cli.py --help
+```
+
+### 4.3 环境维护
+
+**查看已安装的环境**：
+```bash
+conda env list
+```
+
+**更新依赖**：
+```bash
+# Transformers 环境
+conda activate deepseek-ocr
+pip install -r requirements.txt --upgrade
+
+# vLLM 环境
+conda activate deepseek-ocr-vllm
+pip install -r requirements.txt --upgrade
+```
+
+**删除环境**（如需重新配置）：
+```bash
+conda remove -n deepseek-ocr --all
+conda remove -n deepseek-ocr-vllm --all
+```
+
+### 4.4 环境变量说明
+
+两个环境都会自动设置以下环境变量（通过 conda activate 脚本）：
+
+| 变量名 | 值 | 作用 |
+|--------|-----|------|
+| `TORCH_CUDA_ARCH_LIST` | `12.1a` | 指定 CUDA 架构（GB10） |
+| `TRITON_PTXAS_PATH` | `/usr/local/cuda/bin/ptxas` | Triton 编译器路径 |
+| `VLLM_ALLOW_RUNTIME_LORA_UPDATING` | `1` | 允许 vLLM 运行时更新 |
+
+这些变量用于解决 Blackwell 架构（GB10）的 Triton 编译问题。
+
+---
+
+## 五、参考资源
 
 - [DeepSeek-OCR 官方仓库](https://github.com/deepseek-ai/DeepSeek-OCR)
 - [vLLM 官方文档](https://docs.vllm.ai/)
 - [vLLM DeepSeek-OCR 支持](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-OCR.html)
 - [HuggingFace 模型](https://huggingface.co/deepseek-ai/DeepSeek-OCR)
 - [论文 (arXiv)](https://arxiv.org/abs/2510.18234)
+
+---
+
+## i18n
+
+### English Summary
+
+**DeepSeek-OCR on NVIDIA DGX Spark (ASUS GX10)**
+
+This repository is a fork of [DeepSeek-OCR](https://github.com/deepseek-ai/DeepSeek-OCR), optimized for running on **NVIDIA DGX Spark (ASUS GX10)** with native ARM64 + CUDA 13.0 support.
+
+**Key Features:**
+- ✅ Two independent conda environments for Transformers and vLLM inference
+- ✅ Full support for NVIDIA GB10 (Blackwell architecture, CUDA Capability 12.1)
+- ✅ Pre-configured environment variables for Triton compilation
+- ✅ Unified CLI tool (`run_ocr_cli.py`) supporting both frameworks
+- ✅ Batch processing and random sampling modes
+
+**Hardware Requirements:**
+- Machine: ASUS GX10 (NVIDIA DGX Spark)
+- GPU: NVIDIA GB10 (Blackwell, CUDA Capability 12.1)
+- Architecture: ARM64 (aarch64)
+- CUDA: 13.0
+
+**Software Stack:**
+- **deepseek-ocr**: Transformers 4.45.2, Python 3.12.9, PyTorch 2.9.0+cu130
+- **deepseek-ocr-vllm**: Transformers 4.57.3, vLLM 0.11.3.dev0 (compiled from source), Python 3.12.9
+
+**Quick Start:**
+```bash
+# Transformers framework
+conda activate deepseek-ocr
+python run_ocr_cli.py --framework transformers --mode random
+
+# vLLM framework
+conda activate deepseek-ocr-vllm
+python run_ocr_cli.py --framework vllm --mode all
+```
+
+---
+
+### 日本語概要
+
+**NVIDIA DGX Spark (ASUS GX10) での DeepSeek-OCR**
+
+このリポジトリは [DeepSeek-OCR](https://github.com/deepseek-ai/DeepSeek-OCR) のフォークで、**NVIDIA DGX Spark (ASUS GX10)** 上で ARM64 + CUDA 13.0 のネイティブサポートで動作するように最適化されています。
+
+**主な特徴:**
+- ✅ Transformers と vLLM 推論用の2つの独立した conda 環境
+- ✅ NVIDIA GB10 (Blackwell アーキテクチャ、CUDA Capability 12.1) の完全サポート
+- ✅ Triton コンパイル用の事前設定済み環境変数
+- ✅ 両フレームワークをサポートする統一 CLI ツール (`run_ocr_cli.py`)
+- ✅ バッチ処理とランダムサンプリングモード
+
+**ハードウェア要件:**
+- マシン: ASUS GX10 (NVIDIA DGX Spark)
+- GPU: NVIDIA GB10 (Blackwell、CUDA Capability 12.1)
+- アーキテクチャ: ARM64 (aarch64)
+- CUDA: 13.0
+
+**ソフトウェアスタック:**
+- **deepseek-ocr**: Transformers 4.45.2、Python 3.12.9、PyTorch 2.9.0+cu130
+- **deepseek-ocr-vllm**: Transformers 4.57.3、vLLM 0.11.3.dev0 (ソースからコンパイル)、Python 3.12.9
+
+**クイックスタート:**
+```bash
+# Transformers フレームワーク
+conda activate deepseek-ocr
+python run_ocr_cli.py --framework transformers --mode random
+
+# vLLM フレームワーク
+conda activate deepseek-ocr-vllm
+python run_ocr_cli.py --framework vllm --mode all
+```
