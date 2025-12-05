@@ -61,7 +61,9 @@ def get_image_files(input_dir):
 def process_with_transformers(image_files,
                               result_base_dir,
                               framework_dir,
-                              mode='all'):
+                              mode='all',
+                              prompt_mode='enhanced',
+                              language=None):
     """
     使用 Transformers 框架处理图片。
 
@@ -74,11 +76,17 @@ def process_with_transformers(image_files,
     Returns:
         list: 处理结果列表
     """
-    from ocr_transformers import TransformersOCR
+    from ocr_transformers import TransformersOCR, build_prompt
 
     print("\n" + "=" * 60)
     print("使用 Transformers 框架处理")
     print("=" * 60)
+
+    # 构建提示词
+    prompt = build_prompt(prompt_mode, language)
+    print(f"提示词模式: {prompt_mode}")
+    if language:
+        print(f"文档语言: {language}")
 
     ocr = TransformersOCR()
     ocr.initialize()
@@ -97,7 +105,9 @@ def process_with_transformers(image_files,
         shutil.copy2(image_file, output_dir / image_file.name)
 
         try:
-            result = ocr.process_image(str(image_file), str(output_dir))
+            result = ocr.process_image(str(image_file),
+                                       str(output_dir),
+                                       prompt=prompt)
             results.append({
                 'image': image_file.name,
                 'result': result,
@@ -116,7 +126,12 @@ def process_with_transformers(image_files,
     return results
 
 
-def process_with_vllm(image_files, result_base_dir, framework_dir, mode='all'):
+def process_with_vllm(image_files,
+                      result_base_dir,
+                      framework_dir,
+                      mode='all',
+                      prompt_mode='enhanced',
+                      language=None):
     """
     使用 vLLM 框架处理图片。
 
@@ -125,17 +140,25 @@ def process_with_vllm(image_files, result_base_dir, framework_dir, mode='all'):
         result_base_dir: 结果基础目录
         framework_dir: 框架结果目录（vLLM）
         mode: 处理模式（'random' 或 'all'）
+        prompt_mode: 提示词模式
+        language: 文档语言
 
     Returns:
         list: 处理结果列表
     """
     import asyncio
 
-    from ocr_vllm import VLLMOCR
+    from ocr_vllm import VLLMOCR, build_prompt
 
     print("\n" + "=" * 60)
     print("使用 vLLM 框架处理")
     print("=" * 60)
+
+    # 构建提示词
+    prompt = build_prompt(prompt_mode, language)
+    print(f"提示词模式: {prompt_mode}")
+    if language:
+        print(f"文档语言: {language}")
 
     ocr = VLLMOCR()
     ocr.initialize()
@@ -164,6 +187,7 @@ def process_with_vllm(image_files, result_base_dir, framework_dir, mode='all'):
             try:
                 result = await ocr._process_image_async(image_path,
                                                         output_path,
+                                                        prompt=prompt,
                                                         show_progress=True)
                 results.append({
                     'image': image_file.name,
@@ -247,6 +271,18 @@ def main():
                         default='results',
                         help='输出基础目录（默认: results）')
 
+    parser.add_argument(
+        '--prompt',
+        choices=['basic', 'enhanced'],
+        default='enhanced',
+        help='提示词模式: basic（基础）或 enhanced（增强，含表格/编号优化）（默认: enhanced）')
+
+    parser.add_argument(
+        '--language',
+        type=str,
+        default=None,
+        help='文档主要语言: japanese/chinese/korean/english（可选，增强识别效果）')
+
     args = parser.parse_args()
 
     print("=" * 60)
@@ -300,10 +336,12 @@ def main():
         if args.framework == 'transformers':
             results = process_with_transformers(image_files, result_base_dir,
                                                 result_base_dir,
-                                                effective_mode)
+                                                effective_mode, args.prompt,
+                                                args.language)
         else:  # vllm
             results = process_with_vllm(image_files, result_base_dir,
-                                        result_base_dir, effective_mode)
+                                        result_base_dir, effective_mode,
+                                        args.prompt, args.language)
     except KeyboardInterrupt:
         print("\n\n用户中断，正在退出...")
         sys.exit(1)

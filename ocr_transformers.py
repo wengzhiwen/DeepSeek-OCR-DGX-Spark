@@ -40,6 +40,43 @@ STREAM_CHECK_INTERVAL = 500  # 每生成多少个 token 检查一次幻觉
 STREAM_CHECK_START = 2000  # 至少生成多少 token 后才开始检查（避免误判正常文档）
 MAX_TOKENS_LIMIT = 16000  # 流式检测时的最大 token 数
 
+# ============================================================================
+# 提示词模板
+# ============================================================================
+# DeepSeek-OCR 是专门训练的 OCR 模型，只识别以下简单格式的提示词
+# 不要添加复杂指令，模型会把额外内容当作要生成的格式！
+PROMPT_BASIC = '<image>\n<|grounding|>Convert the document to markdown.'
+
+# 语言提示（简单附加，不改变核心格式）
+LANGUAGE_SUFFIXES = {
+    'japanese': ' (Japanese document)',
+    'chinese': ' (Chinese document)',
+    'korean': ' (Korean document)',
+    'english': ' (English document)',
+}
+
+
+def build_prompt(prompt_mode='enhanced', language=None):
+    """
+    构建提示词。
+    
+    注意：DeepSeek-OCR 模型只接受简单提示词，不支持复杂指令。
+    
+    Args:
+        prompt_mode: 'basic' 或 'enhanced'（目前效果相同）
+        language: 语言代码（如 'japanese', 'chinese'）
+        
+    Returns:
+        str: 完整提示词
+    """
+    prompt = '<image>\n<|grounding|>Convert the document to markdown.'
+
+    # 只添加简单的语言标注
+    if language and language.lower() in LANGUAGE_SUFFIXES:
+        prompt = prompt.rstrip('.') + LANGUAGE_SUFFIXES[language.lower()]
+
+    return prompt
+
 
 class HallucinationStoppingCriteria(StoppingCriteria):
     """
@@ -466,7 +503,7 @@ class TransformersOCR:
             raise RuntimeError("模型未初始化，请先调用 initialize() 方法")
 
         if prompt is None:
-            prompt = "<image>\n<|grounding|>Convert the document to markdown. "
+            prompt = DEFAULT_PROMPT
 
         image_name = Path(image_path).stem
         result_mmd_file = Path(output_path) / "result.mmd"
