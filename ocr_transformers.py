@@ -12,6 +12,7 @@ import signal
 import sys
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
@@ -91,52 +92,68 @@ class HallucinationStoppingCriteria(StoppingCriteria):
         return False
 
     def _detect_hallucination(self, text):
-        """快速检测幻觉模式（非常保守，只检测极端情况）"""
-        # 预处理：去除 OCR 特有的标签结构，避免误判
-        # 去除 <|ref|>...<|/ref|><|det|>...<|/det|> 等标签
-        clean_text = re.sub(r'<\|[^|]+\|>[^<]*<\|/[^|]+\|>', '', text)
-        clean_text = re.sub(r'<\|[^|]+\|>\[\[[^\]]+\]\]<\|/[^|]+\|>', '',
-                            clean_text)
-
-        # 如果清理后文本太短，不检测
-        if len(clean_text) < 1000:
+        """
+        通用幻觉检测算法（基于压缩比和 N-gram 频率）。
+        
+        核心原理：幻觉的本质是"异常重复"。
+        """
+        # 如果文本太短，不检测
+        if len(text) < 2000:
             return False
 
-        # 方法1: 检测带编号的重复列表项（去除编号后内容相同）
-        # 只检测真正的幻觉：大量完全相同的内容
-        numbered_items = re.findall(r'^\d+\.\s*(.+)$', clean_text,
-                                    re.MULTILINE)
-        if len(numbered_items) >= MAX_NUMBERED_LIST_ITEMS:
-            normalized_items = [
-                re.sub(r'\d+', '', item).strip()
-                for item in numbered_items[-MAX_NUMBERED_LIST_ITEMS:]
-            ]
-            from collections import Counter
-            counter = Counter(normalized_items)
-            most_common = counter.most_common(1)
-            # 需要 90% 以上相同才判定为幻觉
-            if most_common and most_common[0][
-                    1] >= MAX_NUMBERED_LIST_ITEMS * 0.9:
+        # ========== 方法1: 压缩比检测（最通用）==========
+        text_bytes = text.encode('utf-8')
+        if len(text_bytes) > 2000:
+            compressed = zlib.compress(text_bytes, level=1)
+            compression_ratio = len(compressed) / len(text_bytes)
+
+            # 压缩比异常低说明有大量重复
+            if len(text) > 10000 and compression_ratio < 0.12:
+                return True
+            if len(text) > 5000 and compression_ratio < 0.08:
                 return True
 
-        # 方法2: 检测连续完全相同的行 - 需要极端重复
-        lines = [
-            l.strip() for l in clean_text.split('\n')
-            if l.strip() and len(l.strip()) >= 30
-        ]
-
-        if len(lines) > 30:
-            consecutive = 1
-            prev = lines[0]
-            for line in lines[1:]:
-                # 需要至少 30 字符的行，连续重复 20 次以上
-                if line == prev:
-                    consecutive += 1
-                    if consecutive >= 20:
+        # ========== 方法2: 滑动窗口 N-gram 高频检测 ==========
+        if len(text) > 3000:
+            recent = text[-3000:]
+            for n in [12, 20, 30, 50]:
+                if len(recent) < n * 8:
+                    continue
+                ngrams = {}
+                for i in range(len(recent) - n):
+                    gram = recent[i:i + n]
+                    ngrams[gram] = ngrams.get(gram, 0) + 1
+                if ngrams:
+                    max_gram, max_count = max(ngrams.items(),
+                                              key=lambda x: x[1])
+                    coverage = (max_count * n) / len(recent)
+                    if coverage > 0.25 and max_count >= 8:
                         return True
-                else:
-                    consecutive = 1
-                prev = line
+
+        # ========== 方法3: 连续重复块检测 ==========
+        if len(text) > 1500:
+            recent = text[-1500:]
+            for block_len in range(15, 80, 5):
+                if len(recent) < block_len * 6:
+                    continue
+                i = 0
+                while i + block_len * 2 <= len(recent):
+                    block1 = recent[i:i + block_len]
+                    block2 = recent[i + block_len:i + block_len * 2]
+                    if block1 == block2:
+                        consecutive = 2
+                        j = i + block_len * 2
+                        while j + block_len <= len(recent):
+                            if recent[j:j + block_len] == block1:
+                                consecutive += 1
+                                j += block_len
+                            else:
+                                break
+                        if consecutive >= 5:
+                            return True
+                        i = j
+                    else:
+                        i += 1
 
         return False
 
