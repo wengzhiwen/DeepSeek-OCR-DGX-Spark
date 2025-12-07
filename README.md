@@ -12,8 +12,9 @@
 - [一、Transformers 推理环境 (deepseek-ocr)](#一transformers-推理环境-deepseek-ocr)
 - [二、Transformers 推理使用](#二transformers-推理使用)
 - [三、vLLM 推理环境 (deepseek-ocr-vllm)](#三vllm-推理环境-deepseek-ocr-vllm)
-- [四、环境使用指南](#四环境使用指南)
-- [五、参考资源](#五参考资源)
+- [四、量化 vLLM 环境 (deepseek-ocr-70b-quant)](#四量化-vllm-环境-deepseek-ocr-70b-quant)
+- [五、环境使用指南](#五环境使用指南)
+- [六、参考资源](#六参考资源)
 
 ## 硬件环境
 
@@ -56,6 +57,21 @@
 | 运行脚本 | `run_ocr_cli.py --framework vllm` | |
 
 **配置状态**: ✅ 已配置完成
+
+### 环境 3: deepseek-ocr-70b-quant (量化 vLLM 推理)
+
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.12.9 | conda 环境 |
+| PyTorch | 2.9.0+cu130 | ARM64 + CUDA 13.0 |
+| Transformers | 4.57.3 | 与 vLLM 环境一致 |
+| Tokenizers | 0.22.1 | 与 vLLM 环境一致 |
+| vLLM | 0.11.3.dev0+g275de3417.d20251204 | 源码编译，CUDA 13.0 |
+| 量化/加速组件 | bitsandbytes 0.48.2；compressed-tensors 0.12.2；flashinfer 0.5.2；gguf 0.17.1；cupy-cuda12x 13.6.0 | 面向 70B 量化推理的核心依赖 |
+| CUDA 库 | nvidia-cublas/cudnn/cusparselt/cu13 系列 | 与 GPU 驱动/Blackwell 兼容 |
+| 运行脚本 | `run_ocr_cli.py --framework vllm` | 用于量化模型推理 |
+
+**配置状态**: ✅ 已配置完成（专用于 70B 量化 vLLM）
 
 ### 环境对比
 
@@ -392,9 +408,31 @@ python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
 
 ---
 
-## 四、环境使用指南
+## 四、量化 vLLM 环境 (deepseek-ocr-70b-quant)
 
-### 4.1 如何选择环境
+专门用于 70B 量化模型的 vLLM 推理环境，基于源码编译的 CUDA 13.0 版本，并预置常用量化/加速组件。
+
+- 核心版本：Python 3.12.9；PyTorch 2.9.0+cu130；vLLM 0.11.3.dev0+g275de3417.d20251204；Transformers 4.57.3；Tokenizers 0.22.1。
+- 量化/加速组件：bitsandbytes 0.48.2、compressed-tensors 0.12.2、flashinfer 0.5.2、gguf 0.17.1、cupy-cuda12x 13.6.0；CUDA 13.0 的 nvidia-cu*、cudnn、cusparselt 库已就位。
+- 辅助工具：accelerate 1.12.0、optimum 2.0.0、tiktoken 0.12.0 等，便于量化权重加载与高吞吐推理。
+- 使用方式：`conda activate deepseek-ocr-70b-quant` 后与 `deepseek-ocr-vllm` 相同，直接运行 `python run_ocr_cli.py --framework vllm ...`。
+- 快速校验（可选）：
+```bash
+conda activate deepseek-ocr-70b-quant
+python - <<'PY'
+import torch, vllm, bitsandbytes, flashinfer
+print("Torch:", torch.__version__, "CUDA:", torch.version.cuda)
+print("vLLM:", vllm.__version__)
+print("bitsandbytes:", bitsandbytes.__version__)
+print("flashinfer:", flashinfer.__version__)
+PY
+```
+
+---
+
+## 五、环境使用指南
+
+### 5.1 如何选择环境
 
 | 场景 | 推荐环境 | 原因 |
 |------|---------|------|
@@ -404,7 +442,7 @@ python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
 | 批量处理 | deepseek-ocr-vllm | 吞吐量高，内存效率好 |
 | 首次使用 | deepseek-ocr | 配置简单，依赖少 |
 
-### 4.2 环境切换和使用
+### 5.2 环境切换和使用
 
 ```bash
 # 切换到 Transformers 环境
@@ -413,6 +451,10 @@ python run_ocr_cli.py --framework transformers --mode random --input test_resouc
 
 # 切换到 vLLM 环境
 conda activate deepseek-ocr-vllm
+python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
+
+# 切换到量化 vLLM 环境（同样使用 vllm 框架）
+conda activate deepseek-ocr-70b-quant
 python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
 ```
 
@@ -427,7 +469,7 @@ python run_ocr_cli.py --framework vllm --mode all --input test_resouce/sample1
 python run_ocr_cli.py --help
 ```
 
-### 4.3 环境维护
+### 5.3 环境维护
 
 **查看已安装的环境**：
 ```bash
@@ -449,11 +491,12 @@ pip install -r requirements.txt --upgrade
 ```bash
 conda remove -n deepseek-ocr --all
 conda remove -n deepseek-ocr-vllm --all
+conda remove -n deepseek-ocr-70b-quant --all
 ```
 
-### 4.4 环境变量说明
+### 5.4 环境变量说明
 
-两个环境都会自动设置以下环境变量（通过 conda activate 脚本）：
+三套环境共享同一组 CUDA/Triton 变量（在各自的 conda activate 脚本中设置）：
 
 | 变量名 | 值 | 作用 |
 |--------|-----|------|
@@ -465,7 +508,7 @@ conda remove -n deepseek-ocr-vllm --all
 
 ---
 
-## 五、参考资源
+## 六、参考资源
 
 - [DeepSeek-OCR 官方仓库](https://github.com/deepseek-ai/DeepSeek-OCR)
 - [vLLM 官方文档](https://docs.vllm.ai/)
@@ -484,7 +527,7 @@ conda remove -n deepseek-ocr-vllm --all
 This repository is a fork of [DeepSeek-OCR](https://github.com/deepseek-ai/DeepSeek-OCR), optimized for running on **NVIDIA DGX Spark (ASUS GX10)** with native ARM64 + CUDA 13.0 support.
 
 **Key Features:**
-- ✅ Two independent conda environments for Transformers and vLLM inference
+- ✅ Three conda environments: Transformers, vLLM, and quantized vLLM (70B)
 - ✅ Full support for NVIDIA GB10 (Blackwell architecture, CUDA Capability 12.1)
 - ✅ Pre-configured environment variables for Triton compilation
 - ✅ Unified CLI tool (`run_ocr_cli.py`) supporting both frameworks
@@ -499,6 +542,7 @@ This repository is a fork of [DeepSeek-OCR](https://github.com/deepseek-ai/DeepS
 **Software Stack:**
 - **deepseek-ocr**: Transformers 4.45.2, Python 3.12.9, PyTorch 2.9.0+cu130
 - **deepseek-ocr-vllm**: Transformers 4.57.3, vLLM 0.11.3.dev0 (compiled from source), Python 3.12.9
+- **deepseek-ocr-70b-quant**: Same vLLM stack + quantization helpers (bitsandbytes, compressed-tensors, flashinfer, gguf)
 
 **Quick Start:**
 ```bash
