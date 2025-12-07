@@ -55,3 +55,9 @@ Thumbs.db
 # Logs
 *.log
 
+# local data
+models/
+
+# AI agents
+CLAUDE.md
+AGENTS.md
