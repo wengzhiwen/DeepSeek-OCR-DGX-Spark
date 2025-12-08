@@ -7,9 +7,11 @@ vLLM 后处理工具类
 """
 
 import asyncio
+import json
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -19,15 +21,9 @@ os.environ['VLLM_USE_V1'] = '0'
 
 from vllm import AsyncLLMEngine, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-
-# 导入token logger
 from token_logger import get_token_logger
-
-# 导入OCR模块中的幻觉检测函数
 from ocr_transformers import detect_and_truncate_hallucination
 
-
-# 单页生成超时时间（秒）
 INFERENCE_TIMEOUT_SECONDS = 200
 
 
@@ -36,10 +32,15 @@ def timestamp():
     return datetime.now().strftime("[%H:%M:%S]")
 
 
+@dataclass
+class FixProposal:
+    line: int
+    find: str
+    replace: str
+    reason: str
+
+
 def build_chat_prompt(system_msg: str, user_msg: str) -> str:
-    """
-    按 Llama3/Swallow 聊天模板构建提示，明确区分 system / user。
-    """
     return (
         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
         f"{system_msg}\n"
@@ -49,36 +50,41 @@ def build_chat_prompt(system_msg: str, user_msg: str) -> str:
 
 
 MODEL_CONFIGS = {
-    # 8B 调试配置：中等上下文 + 较高显存利用，兼顾速度与稳定
     "8b": {
-        "max_model_len": 16384,
+        "max_model_len": 8192,
         "gpu_memory_utilization": 0.90,
         "tensor_parallel_size": 1,
         "block_size": 512,
-        "max_num_batched_tokens": 2048,
+        "max_num_batched_tokens": 1024,
         "swap_space": 32,
     },
-    # 70B OCR后处理配置：针对单页处理优化
-    "70b": {
-        "max_model_len": 8192,  # 8K支持最多9页上下文（每页约800-1000 tokens）
-        "gpu_memory_utilization": 0.85,  # 85%充分利用119GB GPU内存
+    "32b": {
+        "max_model_len": 8192,
+        "gpu_memory_utilization": 0.90,
         "tensor_parallel_size": 1,
-        "block_size": 256,  # 小block size适合短文本
-        "max_num_batched_tokens": 1024,  # 减少批处理，适合OCR
-        "swap_space": 16,  # 适中的swap空间
-        # 量化配置优化
+        "block_size": 256,
+        "max_num_batched_tokens": 1024,
+        "swap_space": 16,
+    },
+    "70b": {
+        "max_model_len": 8192,
+        "gpu_memory_utilization": 0.85,
+        "tensor_parallel_size": 1,
+        "block_size": 256,
+        "max_num_batched_tokens": 1024,
+        "swap_space": 16,
         "quant_config": {
             "bitsandbytes": {
-                "max_model_len": 8192,  # 8K for int8 quantization（保持与GPTQ/AWQ一致）
-                "gpu_memory_utilization": 0.80,  # 80% for quantized model
+                "max_model_len": 8192,
+                "gpu_memory_utilization": 0.80,
             },
             "gptq": {
-                "max_model_len": 8192,  # Full 8K for GPTQ
-                "gpu_memory_utilization": 0.90,  # Higher utilization for GPTQ
+                "max_model_len": 8192,
+                "gpu_memory_utilization": 0.90,
             },
             "awq": {
-                "max_model_len": 8192,  # Full 8K for AWQ
-                "gpu_memory_utilization": 0.90,  # Higher utilization for AWQ
+                "max_model_len": 8192,
+                "gpu_memory_utilization": 0.90,
             },
         }
     },
@@ -130,9 +136,7 @@ class PostProcessVLLM:
             "gpu_memory_utilization"]
         self.tensor_parallel_size = tensor_parallel_size if tensor_parallel_size is not None else preset_cfg[
             "tensor_parallel_size"]
-        # 对于量化模型，默认不使用eager模式以提升性能
         if enforce_eager is None:
-            # 量化模型默认使用优化编译，如果遇到问题再手动启用eager
             self.enforce_eager = False if quant_method else preset_cfg.get("enforce_eager", False)
         else:
             self.enforce_eager = enforce_eager
@@ -143,14 +147,15 @@ class PostProcessVLLM:
         """
         根据传入的预设或模型名称选择配置。
 
-        优先使用显式指定的 model_preset；若为 auto，则根据模型名包含“8b”自动选择 8b，否则默认 70b。
+        优先使用显式指定的 model_preset；若为 auto，则根据模型名包含“8b/32b”自动选择，默认 70b。
         """
         if model_preset and model_preset.lower() in MODEL_CONFIGS:
             return model_preset.lower()
 
-        # auto: 根据模型名猜测
         if "8b" in model_path.lower():
             return "8b"
+        if "32b" in model_path.lower():
+            return "32b"
         return "70b"
 
     def initialize(self):
@@ -177,13 +182,10 @@ class PostProcessVLLM:
                 print(f"{timestamp()} 提示: 4bit量化可减少约68%内存使用")
         print(f"{timestamp()} Eager模式: {self.enforce_eager}")
 
-        # 基础引擎参数
         preset_cfg = MODEL_CONFIGS[self.model_preset]
 
-        # 根据量化方法调整参数
         if self.quant_method and self.model_preset == "70b":
             quant_config = preset_cfg.get("quant_config", {}).get(self.quant_method, {})
-            # 使用量化特定的配置，如果没有则使用默认值
             actual_max_model_len = self.max_model_len or quant_config.get("max_model_len", preset_cfg["max_model_len"])
             actual_gpu_util = self.gpu_memory_utilization or quant_config.get("gpu_memory_utilization", preset_cfg["gpu_memory_utilization"])
         else:
@@ -200,14 +202,13 @@ class PostProcessVLLM:
             "gpu_memory_utilization": actual_gpu_util or preset_cfg["gpu_memory_utilization"],
             "swap_space": preset_cfg.get("swap_space", 32),
             "max_num_batched_tokens": preset_cfg.get("max_num_batched_tokens", 2048),
-            "max_num_seqs": 4 if self.model_preset == "70b" else 4,  # 70B保守并发数避免OOM
-            "enable_prefix_caching": False,  # 禁用prefix caching以节省内存
-            "kv_cache_dtype": "fp8" if self.model_preset == "70b" else "auto",  # 使用FP8量化KV cache
-            "disable_log_stats": True,  # 禁用统计日志，减少开销
-            "disable_sliding_window": True,  # 禁用滑动窗口，OCR不需要
+            "max_num_seqs": 4,
+            "enable_prefix_caching": False,
+            "kv_cache_dtype": "fp8" if self.model_preset == "70b" else "auto",
+            "disable_log_stats": True,
+            "disable_sliding_window": True,
         }
 
-        # 添加量化相关参数
         if self.load_format:
             engine_kwargs["load_format"] = self.load_format
         if self.quant_method:
@@ -216,30 +217,38 @@ class PostProcessVLLM:
         engine_args = AsyncEngineArgs(**engine_kwargs)
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
 
-        # 根据模型预设调整采样参数
         if self.model_preset == "70b":
-            # 70B模型的采样参数：强化重复抑制，减少幻觉
             self.sampling_params = SamplingParams(
-                temperature=0.05,  # 更低的温度，减少随机性
-                top_p=0.85,  # 更集中的概率分布
-                top_k=40,  # 减少候选token数量
-                repetition_penalty=1.3,  # 加强重复惩罚
-                frequency_penalty=1.0,  # 加强频率惩罚，避免重复词汇
-                presence_penalty=0.5,  # 增加存在惩罚，鼓励新内容
-                max_tokens=1200,  # 保持最大输出长度
-                skip_special_tokens=False
+                temperature=0.01,
+                top_p=0.50,
+                top_k=10,
+                repetition_penalty=1.05,
+                frequency_penalty=0.2,
+                presence_penalty=0.0,
+                max_tokens=512,
+                skip_special_tokens=True
+            )
+        elif self.model_preset == "32b":
+            self.sampling_params = SamplingParams(
+                temperature=0.01,
+                top_p=0.50,
+                top_k=10,
+                repetition_penalty=1.05,
+                frequency_penalty=0.2,
+                presence_penalty=0.0,
+                max_tokens=512,
+                skip_special_tokens=True
             )
         else:
-            # 8B模型的采样参数：默认配置
             self.sampling_params = SamplingParams(
-                temperature=0.1,
-                top_p=0.85,
-                top_k=50,
-                repetition_penalty=1.2,
-                frequency_penalty=0.6,
-                presence_penalty=0.4,
-                max_tokens=800,
-                skip_special_tokens=False
+                temperature=0.01,
+                top_p=0.50,
+                top_k=10,
+                repetition_penalty=1.05,
+                frequency_penalty=0.2,
+                presence_penalty=0.0,
+                max_tokens=512,
+                skip_special_tokens=True
             )
 
         print(f"{timestamp()} ✓ vLLM 引擎初始化完成！")
@@ -250,9 +259,6 @@ class PostProcessVLLM:
             f"freq_pen={self.sampling_params.frequency_penalty} "
             f"pres_pen={self.sampling_params.presence_penalty} "
             f"max_tokens={self.sampling_params.max_tokens}")
-
-        if self.model_preset == "70b":
-            print(f"{timestamp()} 70B模型: 已启用强化重复抑制参数")
 
     async def _generate_async(self,
                               prompt: str,
@@ -282,7 +288,6 @@ class PostProcessVLLM:
         final_output = ""
         start_time = asyncio.get_event_loop().time()
 
-        # 用于跟踪token使用情况
         prompt_tokens = 0
         completion_tokens = 0
         last_output_token_count = 0
@@ -292,7 +297,6 @@ class PostProcessVLLM:
                     request, self.sampling_params, request_id):
 
                 if request_output.outputs:
-                    # 获取token使用信息
                     if hasattr(request_output, 'prompt_token_ids'):
                         prompt_tokens = len(request_output.prompt_token_ids)
 
@@ -306,11 +310,9 @@ class PostProcessVLLM:
                     printed_length = len(full_text)
                     final_output = full_text
 
-                    # 获取输出的token数量
                     if hasattr(output, 'token_ids'):
                         completion_tokens = len(output.token_ids)
 
-                # 超时保护
                 if (asyncio.get_event_loop().time() - start_time
                     ) > INFERENCE_TIMEOUT_SECONDS:
                     raise TimeoutError(
@@ -322,7 +324,6 @@ class PostProcessVLLM:
             raise RuntimeError(
                 f"vLLM 引擎生成文本时发生错误 (request_id={request_id}): {e}") from e
 
-        # 计算耗时
         elapsed = asyncio.get_event_loop().time() - start_time
 
         if show_progress:
@@ -330,10 +331,8 @@ class PostProcessVLLM:
                 f"\n{timestamp()} 生成完成，耗时: {elapsed:.1f} 秒，输出: {len(final_output)} 字符"
             )
 
-        # 记录token使用情况
         token_logger = get_token_logger()
         if token_logger:
-            # 如果vLLM没有提供准确的token计数，使用估算值
             if prompt_tokens == 0:
                 prompt_tokens = estimate_tokens(prompt)
             if completion_tokens == 0:
@@ -350,15 +349,13 @@ class PostProcessVLLM:
 
         return final_output
 
-    async def correct_grammar_async(self,
-                                     text: str,
-                                     show_progress: bool = True,
-                                     page_name: str = "",
-                                     max_retries: int = 2) -> str:
+    async def propose_line_fixes_async(self,
+                                       text: str,
+                                       show_progress: bool = True,
+                                       page_name: str = "",
+                                       max_retries: int = 2) -> List[FixProposal]:
         """
-        修正日语语法错误。
-
-        只修正明显的语法错误，如果无法确定正确内容则不进行修正。
+        生成行级修正提案（JSON），不返回全文。
 
         Args:
             text: 待修正的文本
@@ -367,127 +364,138 @@ class PostProcessVLLM:
             max_retries: 最大重试次数
 
         Returns:
-            str: 修正后的文本
+            List[FixProposal]: 修正提案列表
         """
-        system_msg = ("あなたは日本語の専門家です。明らかな文法エラーのみを修正し、"
-                      "内容を推測・補完・書き換えせず、修正版だけを1回だけ出力します。"
-                      "説明文やコードブロック( ```)・ラベルは一切書かないでください。"
-                      "段落順を維持し、同じ文を繰り返さないでください。")
-        user_msg = f"元テキストをそのまま修正してください。\n\n{paragraph_count_hint(text)}\n\n{text}"
+        system_msg = (
+            "あなたは日本語の校正者です。以下の指示を厳守してください：\\n"
+            "1. 対象は「文字化け」「スペース誤挿入」「誤字」の3種類のみ。その他の修正提案は全部PASS！\\n"
+            "2. 文字化け/誤字では find と replace に完全の単語を含めて提案してくれ（replaceミスを回避のために）。\\n"
+            "3. スペース誤挿入では不要な空白だけを削除・統一する。空白の前後1〜2文字を含めて find を書き（例: \"プ  レゼン\"→\"プレゼン\"）、文字自体は変えない。\\n"
+            "4. 出力形式: JSON配列のみを返す。先頭/末尾に余計な文字や説明を付けない。\\n"
+            "5. 配列要素の形: {\"line\": 行番号(1から), \"find\": \"誤り片段\", \"replace\": \"修正片段\", \"reason\": 理由}。\\n"
+            "ご注意：\\n"
+            "1. reason は「文字化け」「スペース誤挿入」「誤字」のいずれかに限定する。\\n"
+            "2. 行数を変えない（改行追加・削除禁止）。改行や空白だけの変更単独は出さない。\\n"
+            "3. 確信のある提案のみ、最大20件まで。確信がない場合は空配列を返す。"
+        )
+        user_msg = f"OCRテキスト（行番号付き）:\\n\\n{self._with_line_numbers(text)}"
         prompt = build_chat_prompt(system_msg, user_msg)
 
-        # 重试机制
         for attempt in range(max_retries):
             result = await self._generate_async(prompt,
                                                 show_progress,
                                                 page_name=page_name,
-                                                step_name=f"grammar_attempt_{attempt + 1}")
-
-            # 检测幻觉
-            cleaned_result, has_hallucination, pattern = detect_and_truncate_hallucination(result)
-
-            if has_hallucination:
+                                                step_name=f"grammar_plan_{attempt + 1}")
+            try:
+                proposals = self._parse_fix_json(result)
+                return proposals
+            except Exception as e:
                 if show_progress:
-                    print(f"\n{timestamp()} ⚠ 语法修正检测到幻觉: {pattern}")
+                    print(f"\n{timestamp()} ⚠ 修正提案解析失败: {e}")
                     if attempt < max_retries - 1:
                         print(f"{timestamp()} 正在重试... ({attempt + 2}/{max_retries})")
-                # 如果还有重试机会，继续循环
                 continue
-            else:
-                # 没有幻觉，返回结果
-                return self._sanitize_output(cleaned_result, page_name, "grammar")
 
-        # 所有重试都失败，使用最后一次的结果（或原文）
         if show_progress:
-            print(f"\n{timestamp()} ✗ 语法修正重试次数已达上限，使用原文")
-        return text
+            print(f"\n{timestamp()} ✗ 修正提案生成失败，返回空列表")
+        return []
 
-    async def merge_with_context_async(self,
-                                       current_page: str,
-                                       context_before: str,
-                                       context_after: str,
-                                       page_num: int,
-                                       total_pages: int,
-                                       show_progress: bool = True,
-                                       max_retries: int = 2) -> str:
+    async def review_fixes_async(self,
+                                 text: str,
+                                 proposals: List[FixProposal],
+                                 show_progress: bool = True,
+                                 page_name: str = "",
+                                 max_retries: int = 1) -> List[FixProposal]:
         """
-        使用上下文理解合并页面内容。
-
-        Args:
-            current_page: 当前页面内容
-            context_before: 前面页面的上下文
-            context_after: 后面页面的上下文
-            page_num: 当前页码
-            total_pages: 总页数
-            show_progress: 是否显示进度
-            max_retries: 最大重试次数
-
-        Returns:
-            str: 处理后的页面内容
+        二次复核修正提案：仅保留符合规则的提案，输出过滤后的JSON数组。
         """
-        system_msg = ("あなたは文書編集の専門家です。前後の文脈を考慮しつつ、"
-                      "現在のページを整形してください。内容を推測・補完・書き換えせず、"
-                      "整形した本文だけを1回だけ出力します。説明文やコードブロック( ```)・"
-                      "ラベルは一切書かないでください。段落順を維持し、同じ文を繰り返さないでください。"
-                      "標準的なMarkdownのみを使用してください、但し「```Markdown」マークはいらない 。")
-        user_msg = (f"文書の位置: {page_num}/{total_pages} ページ目\n\n"
-                    f"前のページの内容（参考）:\n{context_before if context_before else '(なし)'}\n\n"
-                    f"現在のページの内容:\n{current_page}\n\n"
-                    f"後のページの内容（参考）:\n{context_after if context_after else '(なし)'}")
+        if not proposals:
+            return []
+
+        system_msg = (
+            "あなたは校正提案のレビュアーです。入力のJSON配列から、規則に反する提案を削除し、"
+            "残りをそのままJSON配列で返してください。前後に余計な文字を付けないこと。\n"
+            "削除すべき提案ルール:\n"
+            "- reason が「文字化け」「スペース誤挿入」「誤字」以外。\n"
+            "- 文字化け/誤字で find と replace の文字数差が1を超えるもの。\n"
+            "- スペース誤挿入なのに空白を含まない、空白以外の文字が変わる、または空白の前後の文字が find に含まれていないもの。\n"
+            "その他の提案を全部PASSしてください。\n"
+            "出力はフィルタ後のJSON配列（同じキー: line, find, replace, reason）のみ。"
+        )
+
+        proposals_json = json.dumps([p.__dict__ for p in proposals], ensure_ascii=False)
+        user_msg = (f"OCRテキスト（参照用）:\n{self._with_line_numbers(text)}\n\n"
+                    f"初回提案(JSON配列):\n{proposals_json}")
         prompt = build_chat_prompt(system_msg, user_msg)
 
-        page_tag = f"{page_num}_{page_name_from_content(current_page)}"
-
-        # 重试机制
+        last_error = ""
         for attempt in range(max_retries):
             result = await self._generate_async(prompt,
                                                 show_progress,
-                                                page_name=page_tag,
-                                                step_name=f"merge_attempt_{attempt + 1}")
-
-            # 检测幻觉
-            cleaned_result, has_hallucination, pattern = detect_and_truncate_hallucination(result)
-
-            if has_hallucination:
+                                                page_name=page_name,
+                                                step_name=f"review_plan_{attempt + 1}")
+            try:
+                reviewed = self._parse_fix_json(result)
+                return reviewed
+            except Exception as e:
+                last_error = str(e)
                 if show_progress:
-                    print(f"\n{timestamp()} ⚠ 合并处理检测到幻觉: {pattern}")
-                    if attempt < max_retries - 1:
-                        print(f"{timestamp()} 正在重试... ({attempt + 2}/{max_retries})")
-                # 如果还有重试机会，继续循环
-                continue
-            else:
-                # 没有幻觉，返回结果
-                try:
-                    return self._sanitize_output(cleaned_result, page_tag, "merge")
-                except RuntimeError as e:
-                    # 检测到代码块，也需要重试
-                    if show_progress and attempt < max_retries - 1:
-                        print(f"\n{timestamp()} ⚠ {e}")
-                        print(f"{timestamp()} 正在重试... ({attempt + 2}/{max_retries})")
-                    continue
-
-        # 所有重试都失败，使用原文
+                    print(f"\n{timestamp()} ⚠ 修正提案レビューパース失敗: {e}")
         if show_progress:
-            print(f"\n{timestamp()} ✗ 合并处理重试次数已达上限，使用原文")
-        return current_page
+            print(f"{timestamp()} ✗ 修正提案レビューフォールバック（使用初回提案）: {last_error}")
+        return proposals
 
     def _sanitize_output(self, text: str, page_name: str,
                          step_name: str) -> str:
         """
         简单校验输出：如出现代码块等不应输出的结构，抛出异常让上层重试。
         """
-        cleaned = text
-        fence_idx = cleaned.find("```")
+        fence_idx = text.find("```")
         if fence_idx != -1:
             raise RuntimeError(
                 f"检测到代码块输出，触发重试 (step={step_name} page={page_name})")
-        return cleaned.strip()
+        return text.strip()
+
+    def _with_line_numbers(self, text: str) -> str:
+        """为提示添加行号，便于模型输出定位。"""
+        lines = text.splitlines()
+        return "\n".join([f"{idx+1}: {line}" for idx, line in enumerate(lines)])
+
+    def _parse_fix_json(self, raw: str) -> List[FixProposal]:
+        """解析模型返回的JSON提案列表。"""
+        cleaned = remove_eot_tokens(raw)
+        data = json.loads(cleaned)
+        proposals: List[FixProposal] = []
+        if not isinstance(data, list):
+            raise ValueError("期望JSON数组")
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            line = int(item.get("line", 0))
+            find = str(item.get("find", "") or "")
+            replace = str(item.get("replace", "") or "")
+            reason = str(item.get("reason", "") or "")
+            if find.strip() == "" or find.strip() == "\\n":
+                continue
+            if replace.strip() == "" and find.strip() in {"", "\\n"}:
+                continue
+            if line > 0 and find:
+                proposals.append(FixProposal(line=line, find=find, replace=replace, reason=reason))
+        return proposals
 
 
 def page_name_from_content(text: str) -> str:
     """尽量从内容生成短标签，避免空 page 名称影响日志"""
     head = re.sub(r'\s+', '', text)[:8]
     return head if head else "page"
+
+def remove_eot_tokens(text: str) -> str:
+    """移除生成中残留的特殊标记（含缺失 '>' 变体），并顺带清理其周围的空白行。"""
+    return re.sub(r'\s*<\|eot_id\|?>\s*', '', text)
+
+def remove_image_tags(text: str) -> str:
+    """移除形如 ![](images/xxx.jpg) 的图片标签。"""
+    return re.sub(r'!\[[^\]]*?\]\(images/[^)]+\)', '', text)
 
 
 def paragraph_count_hint(text: str) -> str:
@@ -509,17 +517,14 @@ def load_ocr_pages(ocr_result_dir: Path) -> List[Tuple[str, str]]:
     pages = []
     ocr_result_dir = Path(ocr_result_dir)
 
-    # 查找所有包含 .md 文件的子目录
     md_files = []
     for subdir in sorted(ocr_result_dir.iterdir()):
         if subdir.is_dir():
-            # 查找该目录下的 .md 文件（排除 _ori.mmd 等）
             for md_file in sorted(subdir.glob("*.md")):
                 if "_ori" not in md_file.stem and "_with_boxes" not in md_file.stem:
                     md_files.append(md_file)
                     break
 
-    # 如果子目录中没有找到，直接在根目录查找
     if not md_files:
         md_files = sorted(ocr_result_dir.glob("*.md"))
         md_files = [
@@ -527,7 +532,6 @@ def load_ocr_pages(ocr_result_dir: Path) -> List[Tuple[str, str]]:
             if "_ori" not in f.stem and "_with_boxes" not in f.stem
         ]
 
-    # 按文件名排序（确保页面顺序正确）
     md_files.sort(key=lambda x: x.name)
 
     for md_file in md_files:
@@ -586,7 +590,6 @@ def estimate_tokens(text: str) -> int:
     Returns:
         int: 估算的token数量
     """
-    # 简单估算：日语/中文字符数 + 英文单词数/4
     jp_ch_count = len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]', text))
     en_count = len(re.findall(r'[a-zA-Z]+', text))
     return jp_ch_count + en_count // 4 + len(text) // 10  # 加上一些缓冲

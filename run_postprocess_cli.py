@@ -64,21 +64,11 @@ def main():
                         default='0',
                         help='CUDA设备编号（默认: 0）')
 
-    parser.add_argument('--context-before',
-                        type=int,
-                        default=1,
-                        help='上下文窗口前页数（默认: 1）')
-
-    parser.add_argument('--context-after',
-                        type=int,
-                        default=1,
-                        help='上下文窗口后页数（默认: 1）')
-
     parser.add_argument('--model-preset',
                         type=str,
                         required=True,
-                        choices=['8b', '70b'],
-                        help='模型预设（必需：8b/70b - 选择对应的配置）')
+                        choices=['8b', '32b', '70b'],
+                        help='模型预设（必需：8b/32b/70b - 选择对应的配置）')
 
     parser.add_argument('--quant-method',
                         type=str,
@@ -107,7 +97,6 @@ def main():
 
     args = parser.parse_args()
 
-    # 验证输入目录
     input_dir = Path(args.input)
     if not input_dir.exists():
         print(f"\n错误: 输入目录不存在: {args.input}")
@@ -117,7 +106,6 @@ def main():
         print(f"\n错误: 输入路径不是目录: {args.input}")
         sys.exit(1)
 
-    # 验证模型路径
     model_path = Path(args.model)
     if not model_path.exists():
         print(f"\n错误: 模型路径不存在: {args.model}")
@@ -129,7 +117,6 @@ def main():
             print("  - /path/to/your/70b/model")
         sys.exit(1)
 
-    # 设置输出目录
     if args.output:
         output_dir = Path(args.output)
     else:
@@ -147,28 +134,12 @@ def main():
     print(f"CUDA设备: {args.cuda_device}")
     if args.tensor_parallel_size:
         print(f"张量并行: {args.tensor_parallel_size}")
-    print(f"上下文窗口: 前{args.context_before}页, 后{args.context_after}页")
     if args.quant_method:
         print(f"量化方法: {args.quant_method}")
         print(f"加载格式: {args.load_format or 'auto'}")
 
-    # 显示模型配置信息
-    print("\n模型配置:")
-    if args.model_preset == "8b":
-        print("  - 上下文长度: 16384 tokens")
-        print("  - GPU内存使用: 90%")
-        print("  - 批处理tokens: 2048")
-    elif args.model_preset == "70b":
-        print("  - 上下文长度: 8192 tokens")
-        print("  - GPU内存使用: 85%")
-        print("  - 批处理tokens: 1024")
-        if args.quant_method == "bitsandbytes":
-            print("  - 量化优化: int8 (内存减少约43%)")
-        elif args.quant_method in ["gptq", "awq"]:
-            print("  - 量化优化: 4bit (内存减少约68%)")
     print("=" * 60)
 
-    # 运行异步处理
     try:
         asyncio.run(
             process_ocr_results(
@@ -176,8 +147,6 @@ def main():
                 output_dir=output_dir,
                 model_path=args.model,
                 cuda_device=args.cuda_device,
-                context_before=args.context_before,
-                context_after=args.context_after,
                 show_progress=not args.no_progress,
                 model_preset=args.model_preset,
                 tensor_parallel_size=args.tensor_parallel_size,
